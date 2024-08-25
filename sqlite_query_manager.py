@@ -33,9 +33,10 @@ class PandasModel(QAbstractTableModel):
         return None
 
 class QuestionDialog(QDialog):
-    def __init__(self, parent=None, conn=None):
+    def __init__(self, parent=None, conn=None, existing_groups=None):
         super().__init__(parent)
         self.conn = conn
+        self.existing_groups = existing_groups or []
         self.setWindowTitle("Add New Question")
         self.setModal(True)
         self.initUI()
@@ -49,6 +50,52 @@ class QuestionDialog(QDialog):
                 border: 1px solid #dcdcdc;
                 border-radius: 4px;
                 padding: 6px;
+            }
+            QLineEdit:disabled, QTextEdit:disabled {
+                background-color: #e0e0e0;
+                color: #707070;
+            }
+            QLabel {
+                color: black;
+            }
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                text-align: center;
+                text-decoration: none;
+                font-size: 14px;
+                margin: 4px 2px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+
+class QuestionDialog(QDialog):
+    def __init__(self, parent=None, conn=None, existing_groups=None):
+        super().__init__(parent)
+        self.conn = conn
+        self.existing_groups = existing_groups or []
+        self.setWindowTitle("Add New Question")
+        self.setModal(True)
+        self.initUI()
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f0f0f0;
+            }
+            QLineEdit, QTextEdit {
+                background-color: white;
+                color: black;
+                border: 1px solid #dcdcdc;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QLineEdit:disabled, QTextEdit:disabled {
+                background-color: #e0e0e0;
+                color: #707070;
             }
             QLabel {
                 color: black;
@@ -82,12 +129,22 @@ class QuestionDialog(QDialog):
         layout.addRow("SQL:", self.sql_input)
 
         self.dynamic_toggle = QCheckBox("Enable Dynamic Input")
-        self.dynamic_toggle.stateChanged.connect(self.toggle_dynamic_input)
+        self.dynamic_toggle.toggled.connect(self.toggle_dynamic_input)
         layout.addRow(self.dynamic_toggle)
 
         self.dynamic_inputs = QTextEdit()
-        self.dynamic_inputs.setVisible(False)
-        layout.addRow("Dynamic Inputs (format: input_name|column_name, one per line):", self.dynamic_inputs)
+        self.dynamic_inputs.setPlaceholderText("Format: input_name|column_name, one per line")
+        self.dynamic_inputs.setEnabled(False)
+        layout.addRow("Dynamic Inputs:", self.dynamic_inputs)
+
+        self.group_input = QComboBox()
+        self.group_input.addItems(self.existing_groups)
+        self.group_input.addItem("New Group...")
+        self.group_input.currentTextChanged.connect(self.on_group_changed)
+        layout.addRow("Group:", self.group_input)
+
+        self.new_group_input = QLineEdit()
+        layout.addRow("New Group Name:", self.new_group_input)
 
         self.submit_button = QPushButton("Add Question")
         self.submit_button.clicked.connect(self.validate_and_accept)
@@ -95,15 +152,20 @@ class QuestionDialog(QDialog):
 
         self.setLayout(layout)
 
-    def toggle_dynamic_input(self, state):
-        self.dynamic_inputs.setVisible(state == Qt.CheckState.Checked)
+    def toggle_dynamic_input(self, checked):
+        self.dynamic_inputs.setEnabled(checked)
+        if not checked:
+            self.dynamic_inputs.clear()
+
+    def on_group_changed(self, text):
+        self.new_group_input.setVisible(text == "New Group...")
 
     def validate_and_accept(self):
         if not self.question_input.text() or not self.sql_input.toPlainText():
             QMessageBox.warning(self, "Error", "Question and SQL are required.")
             return
 
-        if not self.sql_input.toPlainText().lower().startswith("select"):
+        if not self.sql_input.toPlainText().lower().strip().startswith("select"):
             QMessageBox.warning(self, "Error", "Only SELECT queries are allowed.")
             return
 
@@ -120,11 +182,14 @@ class QuestionDialog(QDialog):
 
     def parse_dynamic_inputs(self):
         inputs = {}
-        for line in self.dynamic_inputs.toPlainText().split('\n'):
-            if '|' in line:
-                input_name, column_name = line.split('|')
-                inputs[input_name.strip()] = column_name.strip()
+        if self.dynamic_toggle.isChecked():
+            for line in self.dynamic_inputs.toPlainText().split('\n'):
+                if '|' in line:
+                    input_name, column_name = line.split('|')
+                    inputs[input_name.strip()] = column_name.strip()
         return inputs
+
+
 
 class SQLiteQuestionManager(QMainWindow):
     def __init__(self):
@@ -171,6 +236,10 @@ class SQLiteQuestionManager(QMainWindow):
         self.unload_db_button.clicked.connect(self.unload_database)
         self.unload_db_button.setEnabled(False)
         left_panel.addWidget(self.unload_db_button)
+
+        self.clear_all_button = QPushButton("Clear All")
+        self.clear_all_button.clicked.connect(self.clear_all_data)
+        left_panel.addWidget(self.clear_all_button)
         
         self.create_question_button = QPushButton("Create Question")
         self.create_question_button.clicked.connect(self.create_question)
@@ -250,6 +319,9 @@ class SQLiteQuestionManager(QMainWindow):
     
     def set_style(self):
         self.setStyleSheet("""
+            QDialog {
+                background-color: #f0f0f0;
+            }
             QMainWindow {
                 background-color: #f0f0f0;
             }
@@ -330,25 +402,27 @@ class SQLiteQuestionManager(QMainWindow):
         self.run_questions_button.setEnabled(database_loaded)
     
     def create_question(self):
-        dialog = QuestionDialog(self, self.conn)
+        dialog = QuestionDialog(self, self.conn, list(self.question_groups.keys()))
         if dialog.exec():
             question = dialog.question_input.text()
             description = dialog.description_input.toPlainText()
             sql = dialog.sql_input.toPlainText()
             dynamic_inputs = dialog.parse_dynamic_inputs() if dialog.dynamic_toggle.isChecked() else {}
             
-            group, ok = QInputDialog.getText(self, "Question Group", "Enter group name for this question:")
-            if ok:
-                if group not in self.question_groups:
-                    self.question_groups[group] = []
-                self.question_groups[group].append(question)
-                
-                self.questions[question] = {
-                    "description": description,
-                    "sql": sql,
-                    "dynamic_inputs": dynamic_inputs
-                }
-                self.update_question_tree()
+            group = dialog.group_input.currentText()
+            if group == "New Group...":
+                group = dialog.new_group_input.text()
+            
+            if group not in self.question_groups:
+                self.question_groups[group] = []
+            self.question_groups[group].append(question)
+            
+            self.questions[question] = {
+                "description": description,
+                "sql": sql,
+                "dynamic_inputs": dynamic_inputs
+            }
+            self.update_question_tree()
     
     def update_question_tree(self):
         self.question_tree.clear()
@@ -489,38 +563,58 @@ class SQLiteQuestionManager(QMainWindow):
                 json.dump(data, f, indent=2)
             QMessageBox.information(self, "Success", "Questionnaire saved successfully.")
     
+    def load_single_question(self):
+        filename, _ = QFileDialog.getOpenFileName(self, "Load Questions", "", "JSON Files (*.json)")
+        if filename:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            
+            if "questions" in data and "groups" in data:
+                groups = list(data["groups"].keys())
+                group, ok = QInputDialog.getItem(self, "Select Group", "Choose a group to load from:", groups, 0, False)
+                if ok and group:
+                    questions = data["groups"][group]
+                    question, ok = QInputDialog.getItem(self, "Select Question", "Choose a question to load:", questions, 0, False)
+                    if ok and question:
+                        if group not in self.question_groups:
+                            self.question_groups[group] = []
+                        self.question_groups[group].append(question)
+                        self.questions[question] = data["questions"][question]
+                        self.update_question_tree()
+                        QMessageBox.information(self, "Success", f"Question '{question}' loaded successfully.")
+            else:
+                QMessageBox.warning(self, "Error", "Invalid question file format.")
+
     def load_questionnaire(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Load Questionnaire", "", "JSON Files (*.json)")
         if filename:
             with open(filename, 'r') as f:
                 data = json.load(f)
             
-            self.questions = data.get("questions", {})
-            self.question_groups = data.get("groups", {})
+            new_questions = data.get("questions", {})
+            new_groups = data.get("groups", {})
+            
+            # Merge new data with existing data
+            self.questions.update(new_questions)
+            for group, questions in new_groups.items():
+                if group not in self.question_groups:
+                    self.question_groups[group] = []
+                self.question_groups[group].extend(questions)
+            
             self.update_question_tree()
             
-            QMessageBox.information(self, "Success", "Questionnaire loaded successfully.")
-    
-    def load_single_question(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Load Single Question", "", "JSON Files (*.json)")
-        if filename:
-            with open(filename, 'r') as f:
-                question_data = json.load(f)
-            
-            if isinstance(question_data, dict) and len(question_data) == 1:
-                question = next(iter(question_data))
-                self.questions[question] = question_data[question]
-                
-                group, ok = QInputDialog.getText(self, "Question Group", "Enter group name for this question:")
-                if ok:
-                    if group not in self.question_groups:
-                        self.question_groups[group] = []
-                    self.question_groups[group].append(question)
-                
-                self.update_question_tree()
-                QMessageBox.information(self, "Success", f"Question '{question}' loaded successfully.")
-            else:
-                QMessageBox.warning(self, "Error", "Invalid question file format.")
+            QMessageBox.information(self, "Success", "Questionnaire loaded and merged successfully.")
+
+    def clear_all_data(self):
+        reply = QMessageBox.question(self, 'Clear All Data', 
+                                     'Are you sure you want to clear all questions and groups?',
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.questions.clear()
+            self.question_groups.clear()
+            self.update_question_tree()
+            QMessageBox.information(self, "Success", "All data cleared successfully.")
     
     def save_application_state(self):
         filename, _ = QFileDialog.getSaveFileName(self, "Save Application State", "", "JSON Files (*.json)")
